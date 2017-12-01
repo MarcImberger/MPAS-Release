@@ -1,0 +1,123 @@
+#!/bin/csh
+#PBS -N JOBNAME
+#PBS -r n
+#PBS -l nodes=NUMBEROFNODES:ppn=NUMBEROFCORES
+#PBS -l walltime=WALLTIME
+##PBS -m e
+#PBS -M maim@dtu.dk
+#PBS -o JOBNAME.output
+#PBS -e JOBNAME.error
+#PBS -q workq
+
+limit stacksize unlimited
+
+### Script commands
+set EXE = "JOBNAME" # For init_atmosphere model
+set COPYCONCURRENT=EXETYPE
+##############################################################
+### Copy files to user's scratch directories on compute nodes
+##############################################################
+cd $PBS_O_WORKDIR
+set LocalDir = `pwd`
+set SaveDir = "SAVEDIR"
+
+set SCRATCHDIR = "/scratch/$USER/$PBS_JOBID"
+echo $SCRATCHDIR
+set node = `cat $PBS_NODEFILE | sort -u`
+set nn = $#node
+@ i = 1
+while ($i <= $nn)
+  echo "Now in: $node[$i]"
+  echo $PBS_NODENUM
+  ssh $node[$i] "/bin/mkdir -p $SCRATCHDIR"
+  if ($PBS_NODENUM == 0) then
+    ssh $node[$i] "/bin/ln -s $LocalDir/* $SCRATCHDIR"
+  endif
+  @ i ++
+end
+
+############################
+### cd to scratch directory
+############################
+
+cd $SCRATCHDIR
+set nproc = `wc -l $PBS_NODEFILE | cut -f 1 -d ' '`
+echo $nproc
+
+###################################################
+### Etablish partly copying from scratch directory
+###################################################
+# Here, external function is called, which runs as long as (while loop) Run_info 
+# has the argument 'R' to copy mpasout_* from scratch directory to $SaveDir'
+if ($COPYCONCURRENT <> 0) then
+   @ i = 1
+   while ($i <= $nn)
+     ssh $node[$i] "cd $SCRATCHDIR ; ./CopyConcurrently.csh " &
+     @ i ++
+   end
+endif
+
+######################
+###Run EXECUTABLE#####
+######################
+
+echo "Starting " $EXE " run"
+date
+set host_one = `echo $node[1] | cut -c 1`
+echo $host_one
+if($host_one == j) then
+  echo "mpiexec -np $nproc ./$EXE >& $EXE.out"
+  #mpirun -bind-to core -np $nproc ./$EXE >& $EXE.out 
+  #sleep 20
+  #set OMP_NUM_THREADS=NUMBEROFCORES
+  #s2etenv OMP_NUM_THREADS 20
+  #mpiexec -np $nproc -genv OMP_NUM_THREADS NUMBEROFCORES ./$EXE>& $EXE.out
+  #mpiexec -np $nproc -genv I_MPI_PIN=1 -genv I_MPI_PIN_DOMAIN=core -genv I_MPI_DEBUG=4 ./$EXE >& $EXE.out
+  mpiexec -genv I_MPI_DEBUG=+5 -genv I_MPI_DEBUG_OUTPUT=$EXE.mpidebug -np $nproc ./$EXE >& $EXE.out
+  #mpirun -np $nproc ./$EXE >& $EXE.out
+  set exe_status = $status
+  #echo "I create now some files"
+  #foreach di (`seq 1 1 5`)
+  # echo "asdfasdfasdf" > mpasout_"$di".nc
+  # sleep 10
+  #end
+else
+  
+  echo "mpirun -np $nproc ./$EXE >& $EXE.out"
+  mpirun -np $nproc ./$EXE >& $EXE.out
+  set exe_status = $status
+endif
+echo $status
+echo 'O' >& Run_status.info
+
+#####################################################
+### Copy files back to the submit directory
+#####################################################
+
+@ i = 1
+while ($i <= $nn)
+  echo "Copy: $node[$i]"
+  ssh $node[$i] "/bin/ls $SCRATCHDIR/*"
+  # cp -L : if SOURCE is a symlink, copy the original file and not the link itself
+  #         -> result is not a link anymore!
+  #    -f : overwriting is necessary even though file did not change because there are
+  #         files which are changing (e.g. Run_status.info) and the following cp command has to be valid for
+  #         all files within the directory   
+  ssh $node[$i] "/bin/mv -f $SCRATCHDIR/OUTPUTFILENAME* $SaveDir"
+  ssh $node[$i] "/bin/mv -f $SCRATCHDIR/log.0000.err $SCRATCHDIR/$EXE.log.0000.err"
+  ssh $node[$i] "/bin/mv -f $SCRATCHDIR/log.0000.out $SCRATCHDIR/$EXE.log.0000.out"
+  ssh $node[$i] "/bin/cp -rfL $SCRATCHDIR/* $LocalDir"
+  # Additional files, which should be also copied to $SaveDir:
+  # ssh $node[$i] "/bin/cp -rfL $SCRATCHDIR/OUTPUTFILENAME* $SaveDir"
+  @ i ++
+end
+
+#################
+###Check status
+#################
+if ($exe_status != 0) then
+  echo 'Error in Running ' $EXE
+  exit 1
+else
+  echo 'Succeed in Running ' $EXE
+endif
